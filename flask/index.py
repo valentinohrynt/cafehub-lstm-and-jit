@@ -7,8 +7,8 @@ from sklearn.preprocessing import MinMaxScaler
 app = Flask(__name__)
 model = load_model("lstm_model.keras")
 
-@app.route('/predict-single', methods=['POST'])
-def predict_single():
+@app.route('/predict-bulk-single', methods=['POST'])
+def predict_single_lstm():
     data = request.get_json()
     name = data['name']
     current_stock = float(data['current_stock'])
@@ -45,6 +45,39 @@ def predict_single():
         "Safety Stock": round(safety_stock),
         "Reorder Level": round(reorder_level),
         "Stock to Order": stock_to_order
+    })
+
+@app.route('/predict-daily-single', methods=['POST'])
+def predict_single_jit():
+    data = request.get_json()
+    name = data['name']
+    current_stock = float(data['current_stock'])
+    history = pd.DataFrame(data['history'])  # format: [{date, stock_used}]
+
+    history['date'] = pd.to_datetime(history['date'])
+    history = history.sort_values('date')
+
+    if len(history) < 2:
+        return jsonify({'error': 'Data harus memiliki minimal 2 tanggal untuk estimasi JIT'}), 400
+
+    # Hitung total pemakaian dan durasi hari
+    total_used = history['stock_used'].sum()
+    date_range = (history['date'].max() - history['date'].min()).days
+    avg_daily_use = total_used / date_range if date_range > 0 else total_used
+
+    if avg_daily_use == 0:
+        return jsonify({'error': 'Rata-rata pemakaian harian tidak boleh nol'}), 400
+
+    # Prediksi kapan stok habis
+    predicted_days_left = current_stock / avg_daily_use
+    reorder_date = history['date'].max() + pd.Timedelta(days=predicted_days_left - 5)  # 5 hari buffer
+
+    return jsonify({
+        "Product": name,
+        "Average Daily Usage": round(avg_daily_use, 2),
+        "Current Stock": round(current_stock),
+        "Predicted Days Until Stockout": round(predicted_days_left, 2),
+        "Recommended Reorder Date": reorder_date.strftime('%Y-%m-%d')
     })
 
 if __name__ == '__main__':
