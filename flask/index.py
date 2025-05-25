@@ -5,6 +5,8 @@ from tensorflow.keras.models import load_model
 from sklearn.preprocessing import MinMaxScaler
 
 app = Flask(__name__)
+
+# Yang ini nggak kepakai - START
 model = load_model("lstm_model.keras")
 
 @app.route('/predict-bulk', methods=['POST'])
@@ -15,13 +17,12 @@ def predict_bulk_lstm():
     history['date'] = pd.to_datetime(history['date'])
     history['week'] = history['date'].dt.to_period('W').apply(lambda r: r.start_time)
 
-    weekly = history.groupby('week').sum(numeric_only=True) # asumsi kolom produk sudah terpisah dan jumlah stock_used per produk
+    weekly = history.groupby('week').sum(numeric_only=True) 
     weekly = weekly.tail(4)
 
     if len(weekly) < 4:
         return jsonify({"error": "Data harus memiliki minimal 4 minggu riwayat penggunaan"}), 400
 
-    # Normalisasi per kolom produk
     scalers = {}
     scaled_weekly = weekly.copy()
     for col in weekly.columns:
@@ -29,10 +30,9 @@ def predict_bulk_lstm():
         scaled_weekly[col] = scaler.fit_transform(weekly[[col]])
         scalers[col] = scaler
 
-    # Buat input shape (1, 4, num_produk)
     sequence = np.expand_dims(scaled_weekly.values, axis=0)
 
-    pred_scaled = model.predict(sequence)[0]  # output shape (num_produk, )
+    pred_scaled = model.predict(sequence)[0] 
 
     result = {}
     for i, product in enumerate(weekly.columns):
@@ -51,40 +51,62 @@ def predict_bulk_lstm():
         }
 
     return jsonify(result)
+# Yang ini nggak kepakai - END
 
-
-@app.route('/predict-daily-single', methods=['POST'])
-def predict_single_jit():
+@app.route('/jit-signal-event', methods=['POST'])
+def jit_signal_event_handler():
+    """
+    Endpoint ini menerima status stok saat ini dan parameter JIT dari sistem lain (misalnya Laravel),
+    lalu menentukan apakah sinyal replenishment perlu diaktifkan.
+    """
     data = request.get_json()
-    name = data['name']
-    current_stock = float(data['current_stock'])
-    history = pd.DataFrame(data['history'])  # format: [{date, stock_used}]
 
-    history['date'] = pd.to_datetime(history['date'])
-    history = history.sort_values('date')
+    # --- 1. Validasi Input ---
+    # Memeriksa apakah semua data yang diperlukan dikirim oleh Laravel.
+    if not data:
+        return jsonify({"error": "Request body must be JSON"}), 400
 
-    if len(history) < 2:
-        return jsonify({'error': 'Data harus memiliki minimal 2 tanggal untuk estimasi JIT'}), 400
+    required_fields = ['product_name', 'current_stock', 'signal_point', 'replenish_quantity']
+    missing_fields = [field for field in required_fields if field not in data]
 
-    # Hitung total pemakaian dan durasi hari
-    total_used = history['stock_used'].sum()
-    date_range = (history['date'].max() - history['date'].min()).days
-    avg_daily_use = total_used / date_range if date_range > 0 else total_used
+    if missing_fields:
+        return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
 
-    if avg_daily_use == 0:
-        return jsonify({'error': 'Rata-rata pemakaian harian tidak boleh nol'}), 400
+    # --- 2. Ambil & Konversi Data ---
+    # Ambil semua data dari request. Tidak ada lagi KANBAN_CONFIG.
+    product_name = data['product_name']
+    try:
+        current_stock = float(data['current_stock'])
+        signal_point = float(data['signal_point'])
+        replenish_quantity = float(data['replenish_quantity'])
+    except (ValueError, TypeError):
+        return jsonify({"error": "current_stock, signal_point, and replenish_quantity must be valid numbers."}), 400
 
-    # Prediksi kapan stok habis
-    predicted_days_left = current_stock / avg_daily_use
-    reorder_date = history['date'].max() + pd.Timedelta(days=predicted_days_left - 5)  # 5 hari buffer
+    # --- 3. Logika Inti JIT ---
+    # Logika perbandingan utamanya tetap sama, tapi sekarang lebih sederhana.
+    action_required = "NONE"
+    message = f"JIT Check for '{product_name}'. Current Stock: {current_stock}, Signal Point: {signal_point}."
 
-    return jsonify({
-        "product_name": name,
-        "average_daily_usage": round(avg_daily_use, 2),
-        "current_stock": round(current_stock),
-        "predicted_days_until_stockout": round(predicted_days_left, 2),
-        "recommended_reorder_date": reorder_date.strftime('%Y-%m-%d')
-    })
+    if current_stock <= signal_point:
+        action_required = "INITIATE_JIT_REPLENISHMENT"
+        message = (
+            f"JIT SIGNAL TRIGGERED for '{product_name}'! "
+            f"Current Stock ({current_stock}) is at or below Signal Point ({signal_point}). "
+            f"Initiate replenishment of {replenish_quantity} units."
+        )
+
+    # --- 4. Siapkan & Kirim Respons ---
+    # Buat JSON respons untuk dikirim kembali ke Laravel.
+    response_data = {
+        "product_name": product_name,
+        "current_stock_level": current_stock,
+        "jit_signal_point_checked": signal_point,
+        "action_required": action_required,
+        "jit_replenishment_quantity_recommended": replenish_quantity if action_required == "INITIATE_JIT_REPLENISHMENT" else 0,
+        "message": message
+    }
+
+    return jsonify(response_data)
 
 if __name__ == '__main__':
     app.run(debug=True)
